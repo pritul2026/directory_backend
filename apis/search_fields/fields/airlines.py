@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import List, Optional
 import re
 
 from fastapi import APIRouter, HTTPException
@@ -22,30 +22,24 @@ db = client['directory_db']
 airlines_collection = db["airlines"]
 
 
-# ================== Helper: Name se Slug generate karne ke liye ==================
+# ================== Helper: Name se Slug generate ==================
 def generate_slug(name: str) -> str:
     slug = name.lower().strip()
-    slug = re.sub(r'[^a-z0-9\s-]', '', slug)   # special chars remove
-    slug = re.sub(r'[\s-]+', '-', slug)        # spaces aur multiple - ko single - mein
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+    slug = re.sub(r'[\s-]+', '-', slug)
     return slug.strip('-')
 
 
-# ================== Pydantic Models ==================
-class PhoneNumber(BaseModel):
-    type: str = Field(..., description="e.g. main, customer-care, billing, technical")
-    number: str = Field(..., description="Phone number with country code if possible")
-    extension: Optional[str] = None
-
-
+# ================== Pydantic Models (Simple) ==================
 class AirlineCreate(BaseModel):
     name: str = Field(..., min_length=3, max_length=150)
-    category: str = "airline"   # default airline
-    phone_numbers: List[PhoneNumber] = []
+    category: str = "airline"
+    phone: Optional[str] = None  # Simple string
     website: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
     hours: Optional[str] = None
-    average_hold_time: Optional[int] = None   # in minutes
+    average_hold_time: Optional[int] = None
     best_time_to_call: Optional[str] = None
     phone_menu_tips: Optional[str] = None
     common_issues: List[str] = []
@@ -55,7 +49,7 @@ class AirlineCreate(BaseModel):
 class AirlineUpdate(BaseModel):
     name: Optional[str] = None
     category: Optional[str] = None
-    phone_numbers: Optional[List[PhoneNumber]] = None
+    phone: Optional[str] = None  # Simple string
     website: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -91,8 +85,8 @@ def airline_helper(doc) -> dict:
 
 @router.post("/", response_model=AirlineResponse, status_code=201)
 async def create_airline(data: AirlineCreate):
-    """Nayi Airline / Support Entry add karo"""
-
+    """Nayi Airline add karo"""
+    
     # Check duplicate name
     existing = await airlines_collection.find_one({"name": data.name})
     if existing:
@@ -185,7 +179,6 @@ async def delete_airline(entry_id: str):
     return {"message": "Entry deleted successfully"}
 
 
-# Soft Delete
 @router.patch("/{entry_id}/deactivate")
 async def deactivate_airline(entry_id: str):
     try:
