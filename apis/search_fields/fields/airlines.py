@@ -30,11 +30,11 @@ def generate_slug(name: str) -> str:
     return slug.strip('-')
 
 
-# ================== Pydantic Models (Simple) ==================
+# ================== Pydantic Models ==================
 class AirlineCreate(BaseModel):
     name: str = Field(..., min_length=3, max_length=150)
     category: str = "airline"
-    phone: Optional[str] = None  # Simple string
+    phone: Optional[str] = None
     website: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -49,7 +49,7 @@ class AirlineCreate(BaseModel):
 class AirlineUpdate(BaseModel):
     name: Optional[str] = None
     category: Optional[str] = None
-    phone: Optional[str] = None  # Simple string
+    phone: Optional[str] = None
     website: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -73,7 +73,7 @@ class AirlineResponse(AirlineCreate):
         from_attributes = True
 
 
-# Helper function
+# ================== Helper Function ==================
 def airline_helper(doc) -> dict:
     if not doc:
         return None
@@ -81,13 +81,11 @@ def airline_helper(doc) -> dict:
     return doc
 
 
-# ================== CRUD APIs ==================
+# ================== CRUD + Search APIs ==================
 
 @router.post("/", response_model=AirlineResponse, status_code=201)
 async def create_airline(data: AirlineCreate):
     """Nayi Airline add karo"""
-    
-    # Check duplicate name
     existing = await airlines_collection.find_one({"name": data.name})
     if existing:
         raise HTTPException(status_code=400, detail="This name already exists")
@@ -100,7 +98,6 @@ async def create_airline(data: AirlineCreate):
 
     result = await airlines_collection.insert_one(airline_dict)
     new_entry = await airlines_collection.find_one({"_id": result.inserted_id})
-
     return airline_helper(new_entry)
 
 
@@ -112,9 +109,10 @@ async def get_all_airlines(skip: int = 0, limit: int = 50):
     return entries
 
 
+# ⚠️ IMPORTANT: Ye saare static routes /{entry_id} se PEHLE aane chahiye
 @router.get("/search", response_model=List[AirlineResponse])
 async def search_airlines(q: str):
-    """Name ya slug se search"""
+    """Name ya slug se general search"""
     cursor = airlines_collection.find({
         "$or": [
             {"name": {"$regex": q, "$options": "i"}},
@@ -126,25 +124,51 @@ async def search_airlines(q: str):
     return entries
 
 
+@router.get("/search/by-name", response_model=List[AirlineResponse])
+async def search_airlines_by_name(name: str):
+    """
+    Sirf name se search karo - partial ya full dono chalega.
+    
+    Examples:
+      GET /airlines/search/by-name?name=KLM
+      GET /airlines/search/by-name?name=KLM Royal Dutch Airlines
+      GET /airlines/search/by-name?name=indigo
+    """
+    if not name or not name.strip():
+        raise HTTPException(status_code=400, detail="Name query parameter cannot be empty")
+
+    cursor = airlines_collection.find({
+        "name": {"$regex": name.strip(), "$options": "i"},
+        "is_active": True
+    })
+    entries = [airline_helper(doc) async for doc in cursor]
+
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No airlines found matching '{name}'")
+
+    return entries
+
+
 @router.get("/{entry_id}", response_model=AirlineResponse)
 async def get_airline_by_id(entry_id: str):
+    """ID se single airline fetch karo"""
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     entry = await airlines_collection.find_one({"_id": obj_id})
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
-    
     return airline_helper(entry)
 
 
 @router.put("/{entry_id}", response_model=AirlineResponse)
 async def update_airline(entry_id: str, update_data: AirlineUpdate):
+    """Airline update karo"""
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     update_dict = {k: v for k, v in update_data.dict().items() if v is not None}
@@ -157,7 +181,6 @@ async def update_airline(entry_id: str, update_data: AirlineUpdate):
     update_dict["updated_at"] = datetime.utcnow()
 
     result = await airlines_collection.update_one({"_id": obj_id}, {"$set": update_dict})
-
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Entry not found")
 
@@ -167,9 +190,10 @@ async def update_airline(entry_id: str, update_data: AirlineUpdate):
 
 @router.delete("/{entry_id}")
 async def delete_airline(entry_id: str):
+    """Airline delete karo"""
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     result = await airlines_collection.delete_one({"_id": obj_id})
@@ -181,16 +205,16 @@ async def delete_airline(entry_id: str):
 
 @router.patch("/{entry_id}/deactivate")
 async def deactivate_airline(entry_id: str):
+    """Airline ko deactivate karo (soft delete)"""
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     result = await airlines_collection.update_one(
         {"_id": obj_id},
         {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
     )
-
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Entry not found")
 
