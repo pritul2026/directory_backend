@@ -1,18 +1,26 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from apis.ip_location.ip import get_ip_and_location
 from apis.places.places import router as places_router
-from apis.contact.contact import router as contact_router   # ← yeh sahi hai
+from apis.contact.contact import router as contact_router
 from apis.search_fields.search import router as search_fields_router
 from apis.search_fields.fields.airlines import router as airlines_router
 from apis.search_fields.fields.cruise import router as cruise_router
-
-
 
 app = FastAPI(
     title="Directory Backend",
     description="User IP + Nearby Barber Shops + Contact API",
     version="1.0"
+)
+
+# ✅ CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # ⚠️ production me specific domain dalna
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.get("/ip-location")
