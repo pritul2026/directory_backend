@@ -219,3 +219,54 @@ async def deactivate_airline(entry_id: str):
         raise HTTPException(status_code=404, detail="Entry not found")
 
     return {"message": "Entry deactivated successfully"}
+
+@router.get("/slug/{slug}", response_model=AirlineResponse)
+async def get_airline_by_slug(slug: str):
+    """
+    Slug se single airline fetch karo
+    
+    Examples:
+      GET /airlines/slug/indigo-airlines
+      GET /airlines/slug/emirates
+      GET /airlines/slug/british-airways
+    """
+    if not slug or not slug.strip():
+        raise HTTPException(status_code=400, detail="Slug query parameter cannot be empty")
+    
+    entry = await airlines_collection.find_one({
+        "slug": slug.strip().lower(),
+        "is_active": True
+    })
+    
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"No airline found with slug '{slug}'")
+    
+    return airline_helper(entry)
+
+@router.get("/search", response_model=List[AirlineResponse])
+async def search_airlines(q: str):
+    """
+    Sirf name ya slug se search karo
+    
+    Examples:
+      GET /airlines/search?q=indigo
+      GET /airlines/search?q=indigo-airlines
+      GET /airlines/search?q=emirates
+    """
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Search query cannot be empty")
+    
+    cursor = airlines_collection.find({
+        "$or": [
+            {"name": {"$regex": q.strip(), "$options": "i"}},
+            {"slug": {"$regex": q.strip(), "$options": "i"}}
+        ],
+        "is_active": True
+    })
+    
+    entries = [airline_helper(doc) async for doc in cursor]
+    
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No airlines found matching '{q}'")
+    
+    return entries
