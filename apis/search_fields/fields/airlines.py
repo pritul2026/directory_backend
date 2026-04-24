@@ -109,10 +109,9 @@ async def get_all_airlines(skip: int = 0, limit: int = 50):
     return entries
 
 
-# ⚠️ IMPORTANT: Ye saare static routes /{entry_id} se PEHLE aane chahiye
-@router.get("/search", response_model=List[AirlineResponse])
+@router.get("/search", response_model=List[dict])
 async def search_airlines(q: str):
-    """Name ya slug se general search"""
+    """Name ya slug se general search - sirf limited fields"""
     cursor = airlines_collection.find({
         "$or": [
             {"name": {"$regex": q, "$options": "i"}},
@@ -120,32 +119,17 @@ async def search_airlines(q: str):
         ],
         "is_active": True
     })
-    entries = [airline_helper(doc) async for doc in cursor]
-    return entries
-
-
-@router.get("/search/by-name", response_model=List[AirlineResponse])
-async def search_airlines_by_name(name: str):
-    """
-    Sirf name se search karo - partial ya full dono chalega.
     
-    Examples:
-      GET /airlines/search/by-name?name=KLM
-      GET /airlines/search/by-name?name=KLM Royal Dutch Airlines
-      GET /airlines/search/by-name?name=indigo
-    """
-    if not name or not name.strip():
-        raise HTTPException(status_code=400, detail="Name query parameter cannot be empty")
-
-    cursor = airlines_collection.find({
-        "name": {"$regex": name.strip(), "$options": "i"},
-        "is_active": True
-    })
-    entries = [airline_helper(doc) async for doc in cursor]
-
-    if not entries:
-        raise HTTPException(status_code=404, detail=f"No airlines found matching '{name}'")
-
+    # Sirf ye fields return karo
+    entries = []
+    async for doc in cursor:
+        entries.append({
+            "id": str(doc["_id"]),
+            "slug": doc.get("slug", ""),
+            "name": doc.get("name", ""),
+            "category": doc.get("category", "airline")
+        })
+    
     return entries
 
 
@@ -242,31 +226,3 @@ async def get_airline_by_slug(slug: str):
         raise HTTPException(status_code=404, detail=f"No airline found with slug '{slug}'")
     
     return airline_helper(entry)
-
-@router.get("/search", response_model=List[AirlineResponse])
-async def search_airlines(q: str):
-    """
-    Sirf name ya slug se search karo
-    
-    Examples:
-      GET /airlines/search?q=indigo
-      GET /airlines/search?q=indigo-airlines
-      GET /airlines/search?q=emirates
-    """
-    if not q or not q.strip():
-        raise HTTPException(status_code=400, detail="Search query cannot be empty")
-    
-    cursor = airlines_collection.find({
-        "$or": [
-            {"name": {"$regex": q.strip(), "$options": "i"}},
-            {"slug": {"$regex": q.strip(), "$options": "i"}}
-        ],
-        "is_active": True
-    })
-    
-    entries = [airline_helper(doc) async for doc in cursor]
-    
-    if not entries:
-        raise HTTPException(status_code=404, detail=f"No airlines found matching '{q}'")
-    
-    return entries
