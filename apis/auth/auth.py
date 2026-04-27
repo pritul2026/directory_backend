@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -62,11 +62,7 @@ class AdminResponse(BaseModel):
     full_name: Optional[str] = None
     role: str = "admin"
     created_at: datetime
-    created_by: str  # Super admin ka username
-
-
-class AdminInDB(AdminResponse):
-    hashed_password: str
+    created_by: str
 
 
 class SuperAdminResponse(BaseModel):
@@ -76,6 +72,22 @@ class SuperAdminResponse(BaseModel):
     full_name: Optional[str] = None
     role: str = "superadmin"
     created_at: datetime
+
+
+# ✅ YEH CLASS IMPORTANT HAI - Airlines aur Cruise files ke liye
+class UserInDB(BaseModel):
+    id: str
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    hashed_password: str
+    disabled: bool = False
+    role: str  # "superadmin" or "admin"
+    created_at: datetime
+    created_by: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
 
 
 # ========================= HELPERS =========================
@@ -101,7 +113,8 @@ def create_refresh_token(data: dict):
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def get_user_by_username(username: str):
+async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Returns user dict with 'id' field"""
     user = await users_collection.find_one({"username": username})
     if user:
         user["id"] = str(user.pop("_id"))
@@ -109,7 +122,8 @@ async def get_user_by_username(username: str):
     return None
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+# ✅ YEH FUNCTION AB UserInDB RETURN KAREGA
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -126,12 +140,24 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     user = await get_user_by_username(username)
     if user is None:
         raise credentials_exception
-    return user
+    
+    # Convert to UserInDB object
+    return UserInDB(
+        id=user["id"],
+        username=user["username"],
+        email=user.get("email"),
+        full_name=user.get("full_name"),
+        hashed_password=user["hashed_password"],
+        disabled=user.get("disabled", False),
+        role=user["role"],
+        created_at=user["created_at"],
+        created_by=user.get("created_by")
+    )
 
 
-def require_superadmin(current_user):
+def require_superadmin(current_user: UserInDB):
     """Sirf superadmin ko allow"""
-    if current_user.get("role") == "superadmin":
+    if current_user.role == "superadmin":
         return True
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -139,9 +165,9 @@ def require_superadmin(current_user):
     )
 
 
-def require_admin(current_user):
-    """Admin ya superadmin ko allow (but admin can't see other admins)"""
-    if current_user.get("role") in ["admin", "superadmin"]:
+def require_admin(current_user: UserInDB):
+    """Admin ya superadmin ko allow"""
+    if current_user.role in ["admin", "superadmin"]:
         return True
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -161,6 +187,7 @@ async def init_superadmin():
             "full_name": "Super Admin",
             "hashed_password": hashed_password,
             "role": "superadmin",
+            "disabled": False,
             "created_at": datetime.utcnow(),
             "created_by": "system"
         }
@@ -224,7 +251,7 @@ async def refresh_token(refresh_token: str):
 @router.post("/create-admin", response_model=AdminResponse)
 async def create_admin(
     admin_data: AdminCreate,
-    current_user = Depends(get_current_user)
+    current_user: UserInDB = Depends(get_current_user)
 ):
     """Sirf Super Admin hi naya admin create kar sakta hai"""
     require_superadmin(current_user)
@@ -251,8 +278,9 @@ async def create_admin(
         "full_name": admin_data.full_name,
         "hashed_password": hashed_password,
         "role": "admin",
+        "disabled": False,
         "created_at": datetime.utcnow(),
-        "created_by": current_user.get("username")  # Super admin ka username
+        "created_by": current_user.username  # Super admin ka username
     }
     
     result = await users_collection.insert_one(admin_dict)
@@ -270,7 +298,7 @@ async def create_admin(
 
 
 @router.get("/admins", response_model=List[AdminResponse])
-async def get_all_admins(current_user = Depends(get_current_user)):
+async def get_all_admins(current_user: UserInDB = Depends(get_current_user)):
     """Saare admins ki list - Sirf Super Admin dekh sakta hai"""
     require_superadmin(current_user)
     
@@ -292,7 +320,7 @@ async def get_all_admins(current_user = Depends(get_current_user)):
 @router.get("/admin/{admin_id}")
 async def get_admin_by_id(
     admin_id: str,
-    current_user = Depends(get_current_user)
+    current_user: UserInDB = Depends(get_current_user)
 ):
     """Kisi specific admin ki details - Sirf Super Admin"""
     require_superadmin(current_user)
@@ -320,7 +348,7 @@ async def get_admin_by_id(
 @router.delete("/admin/{admin_id}")
 async def delete_admin(
     admin_id: str,
-    current_user = Depends(get_current_user)
+    current_user: UserInDB = Depends(get_current_user)
 ):
     """Admin ko delete karo - Sirf Super Admin"""
     require_superadmin(current_user)
@@ -336,7 +364,7 @@ async def delete_admin(
         raise HTTPException(status_code=404, detail="Admin not found")
     
     # Delete
-    result = await users_collection.delete_one({"_id": obj_id})
+    await users_collection.delete_one({"_id": obj_id})
     return {"message": f"Admin {admin['username']} deleted successfully"}
 
 
@@ -344,7 +372,7 @@ async def delete_admin(
 async def reset_admin_password(
     admin_id: str,
     new_password: str,
-    current_user = Depends(get_current_user)
+    current_user: UserInDB = Depends(get_current_user)
 ):
     """Admin ka password reset karo - Sirf Super Admin"""
     require_superadmin(current_user)
@@ -371,16 +399,11 @@ async def reset_admin_password(
 
 # ====================== ADMIN AND SUPER ADMIN ROUTES ======================
 
-@router.get("/me")
-async def get_current_user_info(current_user = Depends(get_current_user)):
+@router.get("/me", response_model=UserInDB)
+async def get_current_user_info(current_user: UserInDB = Depends(get_current_user)):
     """Apni info dekh sakta hai (admin ya superadmin)"""
     require_admin(current_user)
-    
-    # Password field hata do response se
-    user_info = {k: v for k, v in current_user.items() if k != "hashed_password"}
-    user_info["id"] = str(user_info.pop("_id")) if "_id" in user_info else user_info.get("id")
-    
-    return user_info
+    return current_user
 
 
 @router.post("/change-password")
@@ -388,13 +411,13 @@ async def change_password(
     old_password: str,
     new_password: str,
     confirm_password: str,
-    current_user = Depends(get_current_user)
+    current_user: UserInDB = Depends(get_current_user)
 ):
     """Apna password change karo (admin ya superadmin)"""
     require_admin(current_user)
     
     # Verify old password
-    if not verify_password(old_password, current_user.get("hashed_password")):
+    if not verify_password(old_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Old password is incorrect")
     
     # Check new password
@@ -407,10 +430,8 @@ async def change_password(
     # Update password
     hashed_password = get_password_hash(new_password)
     await users_collection.update_one(
-        {"username": current_user.get("username")},
+        {"username": current_user.username},
         {"$set": {"hashed_password": hashed_password, "updated_at": datetime.utcnow()}}
     )
     
     return {"message": "Password changed successfully"}
-
-

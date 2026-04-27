@@ -18,7 +18,7 @@ app = FastAPI(
 # ✅ CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ production me specific domain dalna
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,6 +35,11 @@ app.include_router(search_fields_router)
 app.include_router(airlines_router)
 app.include_router(cruise_router)
 app.include_router(auth_router)
+
+@app.on_event("startup")
+async def startup_event():
+    from apis.auth.auth import init_superadmin
+    await init_superadmin()
 
 @app.get("/")
 async def root():
