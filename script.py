@@ -15,7 +15,7 @@ if not MONGO_URI:
 # Connect to MongoDB
 client = MongoClient(MONGO_URI)
 db = client['directory_db']
-airlines_collection = db["airlines"]
+airlines_collection = db["cruise"]
 
 # CSV file path
 csv_file_path = "/Users/pritulsinha/Desktop/directory_backend/data/Airline_TFN_Data (1).csv"

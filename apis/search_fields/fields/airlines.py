@@ -3,11 +3,14 @@ from datetime import datetime
 from typing import List, Optional
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from bson import ObjectId
 from dotenv import load_dotenv
+
+# Auth se import kar rahe hain
+from apis.auth.auth import get_current_user, UserInDB
 
 load_dotenv()
 
@@ -15,7 +18,7 @@ router = APIRouter(prefix="/airlines", tags=["airlines"])
 
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    raise ValueError("MONGO_URI is not set in your .env file")
+    raise ValueError("MONGO_URI is not set in .env file")
 
 client = AsyncIOMotorClient(MONGO_URI)
 db = client['directory_db']
@@ -83,9 +86,78 @@ def airline_helper(doc) -> dict:
 
 # ================== CRUD + Search APIs ==================
 
+# ====================== PUBLIC ROUTES (No Token Required) ======================
+
+@router.get("/", response_model=List[AirlineResponse])
+async def get_all_airlines(skip: int = 0, limit: int = 50):
+    """Saari active airlines"""
+    cursor = airlines_collection.find({"is_active": True}).skip(skip).limit(limit)
+    entries = [airline_helper(doc) async for doc in cursor]
+    return entries
+
+
+@router.get("/search", response_model=List[dict])
+async def search_airlines(q: str):
+    """Name ya slug se search"""
+    cursor = airlines_collection.find({
+        "$or": [
+            {"name": {"$regex": q, "$options": "i"}},
+            {"slug": {"$regex": q, "$options": "i"}}
+        ],
+        "is_active": True
+    })
+    
+    entries = []
+    async for doc in cursor:
+        entries.append({
+            "id": str(doc["_id"]),
+            "slug": doc.get("slug", ""),
+            "name": doc.get("name", ""),
+            "category": doc.get("category", "airline")
+        })
+    
+    return entries
+
+
+@router.get("/{entry_id}", response_model=AirlineResponse)
+async def get_airline_by_id(entry_id: str):
+    """ID se single airline"""
+    try:
+        obj_id = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID")
+
+    entry = await airlines_collection.find_one({"_id": obj_id})
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    return airline_helper(entry)
+
+
+@router.get("/slug/{slug}", response_model=AirlineResponse)
+async def get_airline_by_slug(slug: str):
+    """Slug se single airline fetch"""
+    if not slug or not slug.strip():
+        raise HTTPException(status_code=400, detail="Slug cannot be empty")
+    
+    entry = await airlines_collection.find_one({
+        "slug": slug.strip().lower(),
+        "is_active": True
+    })
+    
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"No airline found with slug '{slug}'")
+    
+    return airline_helper(entry)
+
+
+# ====================== PROTECTED ROUTES (JWT Token Required) ======================
+
 @router.post("/", response_model=AirlineResponse, status_code=201)
-async def create_airline(data: AirlineCreate):
-    """Nayi Airline add karo"""
+async def create_airline(
+    data: AirlineCreate, 
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Nayi Airline add karo (Admin/Authenticated user only)"""
     existing = await airlines_collection.find_one({"name": data.name})
     if existing:
         raise HTTPException(status_code=400, detail="This name already exists")
@@ -101,54 +173,12 @@ async def create_airline(data: AirlineCreate):
     return airline_helper(new_entry)
 
 
-@router.get("/", response_model=List[AirlineResponse])
-async def get_all_airlines(skip: int = 0, limit: int = 50):
-    """Saari active entries"""
-    cursor = airlines_collection.find({"is_active": True}).skip(skip).limit(limit)
-    entries = [airline_helper(doc) async for doc in cursor]
-    return entries
-
-
-@router.get("/search", response_model=List[dict])
-async def search_airlines(q: str):
-    """Name ya slug se general search - sirf limited fields"""
-    cursor = airlines_collection.find({
-        "$or": [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"slug": {"$regex": q, "$options": "i"}}
-        ],
-        "is_active": True
-    })
-    
-    # Sirf ye fields return karo
-    entries = []
-    async for doc in cursor:
-        entries.append({
-            "id": str(doc["_id"]),
-            "slug": doc.get("slug", ""),
-            "name": doc.get("name", ""),
-            "category": doc.get("category", "airline")
-        })
-    
-    return entries
-
-
-@router.get("/{entry_id}", response_model=AirlineResponse)
-async def get_airline_by_id(entry_id: str):
-    """ID se single airline fetch karo"""
-    try:
-        obj_id = ObjectId(entry_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid ID")
-
-    entry = await airlines_collection.find_one({"_id": obj_id})
-    if not entry:
-        raise HTTPException(status_code=404, detail="Entry not found")
-    return airline_helper(entry)
-
-
 @router.put("/{entry_id}", response_model=AirlineResponse)
-async def update_airline(entry_id: str, update_data: AirlineUpdate):
+async def update_airline(
+    entry_id: str, 
+    update_data: AirlineUpdate,
+    current_user: UserInDB = Depends(get_current_user)
+):
     """Airline update karo"""
     try:
         obj_id = ObjectId(entry_id)
@@ -173,8 +203,11 @@ async def update_airline(entry_id: str, update_data: AirlineUpdate):
 
 
 @router.delete("/{entry_id}")
-async def delete_airline(entry_id: str):
-    """Airline delete karo"""
+async def delete_airline(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Airline hard delete"""
     try:
         obj_id = ObjectId(entry_id)
     except Exception:
@@ -188,8 +221,11 @@ async def delete_airline(entry_id: str):
 
 
 @router.patch("/{entry_id}/deactivate")
-async def deactivate_airline(entry_id: str):
-    """Airline ko deactivate karo (soft delete)"""
+async def deactivate_airline(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Airline deactivate (soft delete)"""
     try:
         obj_id = ObjectId(entry_id)
     except Exception:
@@ -203,26 +239,3 @@ async def deactivate_airline(entry_id: str):
         raise HTTPException(status_code=404, detail="Entry not found")
 
     return {"message": "Entry deactivated successfully"}
-
-@router.get("/slug/{slug}", response_model=AirlineResponse)
-async def get_airline_by_slug(slug: str):
-    """
-    Slug se single airline fetch karo
-    
-    Examples:
-      GET /airlines/slug/indigo-airlines
-      GET /airlines/slug/emirates
-      GET /airlines/slug/british-airways
-    """
-    if not slug or not slug.strip():
-        raise HTTPException(status_code=400, detail="Slug query parameter cannot be empty")
-    
-    entry = await airlines_collection.find_one({
-        "slug": slug.strip().lower(),
-        "is_active": True
-    })
-    
-    if not entry:
-        raise HTTPException(status_code=404, detail=f"No airline found with slug '{slug}'")
-    
-    return airline_helper(entry)

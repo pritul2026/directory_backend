@@ -3,11 +3,13 @@ from datetime import datetime
 from typing import List, Optional
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from bson import ObjectId
 from dotenv import load_dotenv
+
+from apis.auth.auth import get_current_user, UserInDB
 
 load_dotenv()
 
@@ -22,30 +24,24 @@ db = client['directory_db']
 cruise_collection = db["cruise"]
 
 
-# ================== Helper: Name se Slug generate karne ke liye ==================
+# ================== Slug Generator ==================
 def generate_slug(name: str) -> str:
     slug = name.lower().strip()
-    slug = re.sub(r'[^a-z0-9\s-]', '', slug)   # special chars remove
-    slug = re.sub(r'[\s-]+', '-', slug)        # spaces aur multiple - ko single - mein
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+    slug = re.sub(r'[\s-]+', '-', slug)
     return slug.strip('-')
 
 
-# ================== Pydantic Models ==================
-class PhoneNumber(BaseModel):
-    type: str = Field(..., description="e.g. main, reservations, customer-service, billing")
-    number: str = Field(..., description="Phone number with country code if possible")
-    extension: Optional[str] = None
-
-
+# ================== Pydantic Models (EXACTLY SAME as Airlines) ==================
 class CruiseCreate(BaseModel):
     name: str = Field(..., min_length=3, max_length=150)
-    category: str = "cruise"          # default category
-    phone_numbers: List[PhoneNumber] = []
+    category: str = "cruise"
+    phone: Optional[str] = None
     website: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
     hours: Optional[str] = None
-    average_hold_time: Optional[int] = None   # in minutes
+    average_hold_time: Optional[int] = None
     best_time_to_call: Optional[str] = None
     phone_menu_tips: Optional[str] = None
     common_issues: List[str] = []
@@ -55,7 +51,7 @@ class CruiseCreate(BaseModel):
 class CruiseUpdate(BaseModel):
     name: Optional[str] = None
     category: Optional[str] = None
-    phone_numbers: Optional[List[PhoneNumber]] = None
+    phone: Optional[str] = None
     website: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -74,53 +70,54 @@ class CruiseResponse(CruiseCreate):
     is_active: bool = True
     created_at: datetime
     updated_at: datetime
+    # Extra fields jo database mein hain (address wale)
+    address: Optional[str] = ""
+    city: Optional[str] = ""
+    state: Optional[str] = ""
+    country: Optional[str] = ""
+    zip_code: Optional[str] = ""
 
     class Config:
         from_attributes = True
+        arbitrary_types_allowed = True
+        json_encoders = {
+            str: lambda v: v if v is not None else ""
+        }
 
 
-# Helper function
+# ================== Helper Function ==================
 def cruise_helper(doc) -> dict:
     if not doc:
         return None
     doc["id"] = str(doc.pop("_id"))
+    
+    # Default values set kar do missing fields ke liye
+    doc.setdefault("address", "")
+    doc.setdefault("city", "")
+    doc.setdefault("state", "")
+    doc.setdefault("country", "")
+    doc.setdefault("zip_code", "")
+    doc.setdefault("slug", generate_slug(doc.get("name", "")))
+    doc.setdefault("common_issues", [])
+    
+    # Description clean karo
+    if "description" in doc and doc["description"]:
+        doc["description"] = str(doc["description"]).strip()
+    
     return doc
 
 
-# ================== CRUD APIs ==================
-
-@router.post("/", response_model=CruiseResponse, status_code=201)
-async def create_cruise(data: CruiseCreate):
-    """Naya Cruise Company / Support Entry add karo"""
-
-    # Check duplicate name
-    existing = await cruise_collection.find_one({"name": data.name})
-    if existing:
-        raise HTTPException(status_code=400, detail="This cruise company name already exists")
-
-    cruise_dict = data.dict()
-    cruise_dict["slug"] = generate_slug(data.name)
-    cruise_dict["is_active"] = True
-    cruise_dict["created_at"] = datetime.utcnow()
-    cruise_dict["updated_at"] = datetime.utcnow()
-
-    result = await cruise_collection.insert_one(cruise_dict)
-    new_entry = await cruise_collection.find_one({"_id": result.inserted_id})
-
-    return cruise_helper(new_entry)
-
+# ====================== PUBLIC ROUTES ======================
 
 @router.get("/", response_model=List[CruiseResponse])
 async def get_all_cruises(skip: int = 0, limit: int = 50):
-    """Saari active cruise entries"""
     cursor = cruise_collection.find({"is_active": True}).skip(skip).limit(limit)
     entries = [cruise_helper(doc) async for doc in cursor]
     return entries
 
 
-@router.get("/search", response_model=List[CruiseResponse])
+@router.get("/search", response_model=List[dict])
 async def search_cruises(q: str):
-    """Name ya slug se search"""
     cursor = cruise_collection.find({
         "$or": [
             {"name": {"$regex": q, "$options": "i"}},
@@ -128,7 +125,15 @@ async def search_cruises(q: str):
         ],
         "is_active": True
     })
-    entries = [cruise_helper(doc) async for doc in cursor]
+    
+    entries = []
+    async for doc in cursor:
+        entries.append({
+            "id": str(doc["_id"]),
+            "slug": doc.get("slug", ""),
+            "name": doc.get("name", ""),
+            "category": doc.get("category", "cruise")
+        })
     return entries
 
 
@@ -136,21 +141,69 @@ async def search_cruises(q: str):
 async def get_cruise_by_id(entry_id: str):
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     entry = await cruise_collection.find_one({"_id": obj_id})
     if not entry:
-        raise HTTPException(status_code=404, detail="Cruise entry not found")
+        raise HTTPException(status_code=404, detail="Cruise not found")
     
     return cruise_helper(entry)
 
 
+@router.get("/slug/{slug}", response_model=CruiseResponse)
+async def get_cruise_by_slug(slug: str):
+    if not slug or not slug.strip():
+        raise HTTPException(status_code=400, detail="Slug cannot be empty")
+    
+    entry = await cruise_collection.find_one({
+        "slug": slug.strip().lower(),
+        "is_active": True
+    })
+    
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"No cruise found with slug '{slug}'")
+    
+    return cruise_helper(entry)
+
+
+# ====================== PROTECTED ROUTES ======================
+
+@router.post("/", response_model=CruiseResponse, status_code=201)
+async def create_cruise(
+    data: CruiseCreate, 
+    current_user: UserInDB = Depends(get_current_user)
+):
+    existing = await cruise_collection.find_one({"name": data.name})
+    if existing:
+        raise HTTPException(status_code=400, detail="This cruise name already exists")
+
+    cruise_dict = data.dict()
+    cruise_dict["slug"] = generate_slug(data.name)
+    cruise_dict["is_active"] = True
+    cruise_dict["created_at"] = datetime.utcnow()
+    cruise_dict["updated_at"] = datetime.utcnow()
+    cruise_dict.setdefault("address", "")
+    cruise_dict.setdefault("city", "")
+    cruise_dict.setdefault("state", "")
+    cruise_dict.setdefault("country", "")
+    cruise_dict.setdefault("zip_code", "")
+
+    result = await cruise_collection.insert_one(cruise_dict)
+    new_entry = await cruise_collection.find_one({"_id": result.inserted_id})
+    
+    return cruise_helper(new_entry)
+
+
 @router.put("/{entry_id}", response_model=CruiseResponse)
-async def update_cruise(entry_id: str, update_data: CruiseUpdate):
+async def update_cruise(
+    entry_id: str, 
+    update_data: CruiseUpdate,
+    current_user: UserInDB = Depends(get_current_user)
+):
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     update_dict = {k: v for k, v in update_data.dict().items() if v is not None}
@@ -163,42 +216,45 @@ async def update_cruise(entry_id: str, update_data: CruiseUpdate):
     update_dict["updated_at"] = datetime.utcnow()
 
     result = await cruise_collection.update_one({"_id": obj_id}, {"$set": update_dict})
-
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Cruise entry not found")
+        raise HTTPException(status_code=404, detail="Cruise not found")
 
     updated = await cruise_collection.find_one({"_id": obj_id})
     return cruise_helper(updated)
 
 
 @router.delete("/{entry_id}")
-async def delete_cruise(entry_id: str):
+async def delete_cruise(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     result = await cruise_collection.delete_one({"_id": obj_id})
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Cruise entry not found")
+        raise HTTPException(status_code=404, detail="Cruise not found")
 
-    return {"message": "Cruise entry deleted successfully"}
+    return {"message": "Cruise deleted successfully"}
 
 
-# Soft Delete
 @router.patch("/{entry_id}/deactivate")
-async def deactivate_cruise(entry_id: str):
+async def deactivate_cruise(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
     try:
         obj_id = ObjectId(entry_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID")
 
     result = await cruise_collection.update_one(
         {"_id": obj_id},
         {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
     )
-
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Cruise entry not found")
+        raise HTTPException(status_code=404, detail="Cruise not found")
 
-    return {"message": "Cruise entry deactivated successfully"}
+    return {"message": "Cruise deactivated successfully"}

@@ -7,6 +7,7 @@ from apis.contact.contact import router as contact_router
 from apis.search_fields.search import router as search_fields_router
 from apis.search_fields.fields.airlines import router as airlines_router
 from apis.search_fields.fields.cruise import router as cruise_router
+from apis.auth.auth import router as auth_router
 
 app = FastAPI(
     title="Directory Backend",
@@ -33,6 +34,7 @@ app.include_router(contact_router)
 app.include_router(search_fields_router)
 app.include_router(airlines_router)
 app.include_router(cruise_router)
+app.include_router(auth_router)
 
 @app.get("/")
 async def root():
