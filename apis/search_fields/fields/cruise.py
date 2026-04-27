@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 import re
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from bson import ObjectId
@@ -32,7 +32,7 @@ def generate_slug(name: str) -> str:
     return slug.strip('-')
 
 
-# ================== Pydantic Models (EXACTLY SAME as Airlines) ==================
+# ================== Pydantic Models ==================
 class CruiseCreate(BaseModel):
     name: str = Field(..., min_length=3, max_length=150)
     category: str = "cruise"
@@ -70,7 +70,7 @@ class CruiseResponse(CruiseCreate):
     is_active: bool = True
     created_at: datetime
     updated_at: datetime
-    # Extra fields jo database mein hain (address wale)
+    # Extra fields
     address: Optional[str] = ""
     city: Optional[str] = ""
     state: Optional[str] = ""
@@ -91,7 +91,7 @@ def cruise_helper(doc) -> dict:
         return None
     doc["id"] = str(doc.pop("_id"))
     
-    # Default values set kar do missing fields ke liye
+    # Default values for missing fields
     doc.setdefault("address", "")
     doc.setdefault("city", "")
     doc.setdefault("state", "")
@@ -100,7 +100,6 @@ def cruise_helper(doc) -> dict:
     doc.setdefault("slug", generate_slug(doc.get("name", "")))
     doc.setdefault("common_issues", [])
     
-    # Description clean karo
     if "description" in doc and doc["description"]:
         doc["description"] = str(doc["description"]).strip()
     
@@ -110,14 +109,22 @@ def cruise_helper(doc) -> dict:
 # ====================== PUBLIC ROUTES ======================
 
 @router.get("/", response_model=List[CruiseResponse])
-async def get_all_cruises(skip: int = 0, limit: int = 50):
-    cursor = cruise_collection.find({"is_active": True}).skip(skip).limit(limit)
+async def get_all_cruises(
+    skip: int = 0, 
+    limit: int = 50,
+    show_all: bool = Query(False, description="Show both active and inactive cruises")
+):
+    """Saari cruises - show_all=true se inactive bhi aa jayenge"""
+    query = {} if show_all else {"is_active": True}
+    
+    cursor = cruise_collection.find(query).skip(skip).limit(limit)
     entries = [cruise_helper(doc) async for doc in cursor]
     return entries
 
 
 @router.get("/search", response_model=List[dict])
 async def search_cruises(q: str):
+    """Search only active cruises"""
     cursor = cruise_collection.find({
         "$or": [
             {"name": {"$regex": q, "$options": "i"}},
@@ -183,6 +190,8 @@ async def create_cruise(
     cruise_dict["is_active"] = True
     cruise_dict["created_at"] = datetime.utcnow()
     cruise_dict["updated_at"] = datetime.utcnow()
+    
+    # Extra fields default
     cruise_dict.setdefault("address", "")
     cruise_dict.setdefault("city", "")
     cruise_dict.setdefault("state", "")
