@@ -89,9 +89,10 @@ def airline_helper(doc) -> dict:
 async def get_all_airlines(
     skip: int = 0, 
     limit: int = 50,
-    show_all: bool = Query(False, description="Show both active and inactive airlines")
+    show_all: bool = Query(True, description="Show both active and inactive airlines")
 ):
-    """Saari airlines - show_all=true se inactive bhi aa jayenge"""
+    """Saari airlines dikhega (active + inactive). 
+    Agar sirf active chahiye to ?show_all=false use karo"""
     query = {} if show_all else {"is_active": True}
     
     cursor = airlines_collection.find(query).skip(skip).limit(limit)
@@ -100,15 +101,22 @@ async def get_all_airlines(
 
 
 @router.get("/search", response_model=List[dict])
-async def search_airlines(q: str):
-    """Name ya slug se search (sirf active)"""
-    cursor = airlines_collection.find({
+async def search_airlines(
+    q: str,
+    show_all: bool = Query(True, description="Search in both active and inactive airlines")
+):
+    """Name ya slug se search - ab show_all=true se inactive bhi search honge"""
+    query = {
         "$or": [
             {"name": {"$regex": q, "$options": "i"}},
             {"slug": {"$regex": q, "$options": "i"}}
-        ],
-        "is_active": True
-    })
+        ]
+    }
+    
+    if not show_all:
+        query["is_active"] = True
+    
+    cursor = airlines_collection.find(query)
     
     entries = []
     async for doc in cursor:
@@ -116,7 +124,8 @@ async def search_airlines(q: str):
             "id": str(doc["_id"]),
             "slug": doc.get("slug", ""),
             "name": doc.get("name", ""),
-            "category": doc.get("category", "airline")
+            "category": doc.get("category", "airline"),
+            "is_active": doc.get("is_active", True)  # Added is_active flag in response
         })
     
     return entries
@@ -124,6 +133,7 @@ async def search_airlines(q: str):
 
 @router.get("/{entry_id}", response_model=AirlineResponse)
 async def get_airline_by_id(entry_id: str):
+    """ID se airline fetch karo - active/inactive dono milenge"""
     try:
         obj_id = ObjectId(entry_id)
     except Exception:
@@ -136,14 +146,19 @@ async def get_airline_by_id(entry_id: str):
 
 
 @router.get("/slug/{slug}", response_model=AirlineResponse)
-async def get_airline_by_slug(slug: str):
+async def get_airline_by_slug(
+    slug: str,
+    show_all: bool = Query(True, description="Show both active and inactive")
+):
+    """Slug se airline fetch karo - ab show_all=true se inactive bhi dikhega"""
     if not slug or not slug.strip():
         raise HTTPException(status_code=400, detail="Slug cannot be empty")
     
-    entry = await airlines_collection.find_one({
-        "slug": slug.strip().lower(),
-        "is_active": True
-    })
+    query = {"slug": slug.strip().lower()}
+    if not show_all:
+        query["is_active"] = True
+    
+    entry = await airlines_collection.find_one(query)
     
     if not entry:
         raise HTTPException(status_code=404, detail=f"No airline found with slug '{slug}'")
@@ -236,3 +251,24 @@ async def deactivate_airline(
         raise HTTPException(status_code=404, detail="Entry not found")
 
     return {"message": "Entry deactivated successfully"}
+
+
+@router.patch("/{entry_id}/activate")
+async def activate_airline(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Inactive airline ko wapas active karne ke liye"""
+    try:
+        obj_id = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID")
+
+    result = await airlines_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {"is_active": True, "updated_at": datetime.utcnow()}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    return {"message": "Entry activated successfully"}
