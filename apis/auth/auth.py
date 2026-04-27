@@ -29,7 +29,7 @@ ACCESS_TOKEN_EXPIRE_DAYS = 3
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 SUPER_ADMIN_USERNAME = "admin_creative_volt"
-SUPER_ADMIN_PASSWORD = "YourStrongPassword123!"  # Change this to strong password
+SUPER_ADMIN_PASSWORD = "Media@1234"  # Change this to strong password
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
