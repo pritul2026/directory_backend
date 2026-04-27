@@ -28,7 +28,8 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 3
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
-SUPER_ADMIN_USERNAME = "admin_creative_volt"   # Yeh sirf ek hi superadmin rahega
+SUPER_ADMIN_USERNAME = "admin_creative_volt"
+SUPER_ADMIN_PASSWORD = "YourStrongPassword123!"  # Change this to strong password
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -46,32 +47,35 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
-class UserCreate(BaseModel):
-    username: str
-    email: Optional[EmailStr] = None
+class AdminCreate(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr
     full_name: Optional[str] = None
-    password: str
-    confirm_password: str = Field(..., description="Must match with password")
+    password: str = Field(..., min_length=6)
+    confirm_password: str
 
 
-class UserResponse(BaseModel):
+class AdminResponse(BaseModel):
+    id: str
+    username: str
+    email: str
+    full_name: Optional[str] = None
+    role: str = "admin"
+    created_at: datetime
+    created_by: str  # Super admin ka username
+
+
+class AdminInDB(AdminResponse):
+    hashed_password: str
+
+
+class SuperAdminResponse(BaseModel):
     id: str
     username: str
     email: Optional[str] = None
     full_name: Optional[str] = None
-    disabled: bool = False
-    created_at: Optional[datetime] = None
-    is_superadmin: bool = False
-    role: str = "user"  # user, admin, superadmin
-
-
-class UserInDB(UserResponse):
-    hashed_password: str
-
-
-class MakeAdminRequest(BaseModel):
-    user_id: str
-    role: str = Field(..., description="Role can be 'admin' or 'user'")
+    role: str = "superadmin"
+    created_at: datetime
 
 
 # ========================= HELPERS =========================
@@ -101,7 +105,7 @@ async def get_user_by_username(username: str):
     user = await users_collection.find_one({"username": username})
     if user:
         user["id"] = str(user.pop("_id"))
-        return UserInDB(**user)
+        return user
     return None
 
 
@@ -125,9 +129,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     return user
 
 
-def require_superadmin(current_user: UserInDB):
-    """Strict check - Sirf superadmin ko hi allow"""
-    if current_user.is_superadmin:
+def require_superadmin(current_user):
+    """Sirf superadmin ko allow"""
+    if current_user.get("role") == "superadmin":
         return True
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -135,73 +139,54 @@ def require_superadmin(current_user: UserInDB):
     )
 
 
-def require_admin_or_superadmin(current_user: UserInDB):
-    """Admin ya Superadmin ko allow"""
-    if current_user.role in ["admin", "superadmin"] or current_user.is_superadmin:
+def require_admin(current_user):
+    """Admin ya superadmin ko allow (but admin can't see other admins)"""
+    if current_user.get("role") in ["admin", "superadmin"]:
         return True
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Admin or Super Admin privileges required."
+        detail="Authentication required."
     )
 
 
-# ========================= ROUTES =========================
+# ========================= INITIAL SETUP =========================
+async def init_superadmin():
+    """Pehli baar server start ho to superadmin create ho jaaye"""
+    existing = await users_collection.find_one({"username": SUPER_ADMIN_USERNAME})
+    if not existing:
+        hashed_password = get_password_hash(SUPER_ADMIN_PASSWORD)
+        superadmin_dict = {
+            "username": SUPER_ADMIN_USERNAME,
+            "email": "superadmin@example.com",
+            "full_name": "Super Admin",
+            "hashed_password": hashed_password,
+            "role": "superadmin",
+            "created_at": datetime.utcnow(),
+            "created_by": "system"
+        }
+        await users_collection.insert_one(superadmin_dict)
+        print(f"✅ Superadmin created: {SUPER_ADMIN_USERNAME}")
+        print(f"⚠️  Password: {SUPER_ADMIN_PASSWORD}")
+    else:
+        print("✅ Superadmin already exists")
 
-@router.post("/register", response_model=UserResponse)
-async def register(user: UserCreate):
-    if user.password != user.confirm_password:
-        raise HTTPException(
-            status_code=400,
-            detail="Password and confirm password do not match"
-        )
 
-    # Username already exists check
-    existing_user = await users_collection.find_one({"username": user.username})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Username already registered")
-
-    if user.email:
-        existing_email = await users_collection.find_one({"email": user.email})
-        if existing_email:
-            raise HTTPException(status_code=400, detail="Email already registered")
-
-    hashed_password = get_password_hash(user.password)
-
-    # Superadmin check
-    is_superadmin = (user.username == SUPER_ADMIN_USERNAME)
-    role = "superadmin" if is_superadmin else "user"
-
-    user_dict = {
-        "username": user.username,
-        "email": user.email,
-        "full_name": user.full_name,
-        "hashed_password": hashed_password,
-        "disabled": False,
-        "is_superadmin": is_superadmin,
-        "role": role,
-        "created_at": datetime.utcnow()
-    }
-
-    result = await users_collection.insert_one(user_dict)
-    new_user = await users_collection.find_one({"_id": result.inserted_id})
-    new_user["id"] = str(new_user.pop("_id"))
-
-    return UserResponse(**{k: v for k, v in new_user.items() if k in UserResponse.model_fields})
-
+# ========================= PUBLIC ROUTES =========================
 
 @router.post("/login", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Superadmin ya admin login kar sakte hain"""
     user = await get_user_by_username(form_data.username)
     
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user or not verify_password(form_data.password, user.get("hashed_password")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token = create_access_token(data={"sub": user.username})
-    refresh_token = create_refresh_token(data={"sub": user.username})
+    access_token = create_access_token(data={"sub": user["username"]})
+    refresh_token = create_refresh_token(data={"sub": user["username"]})
 
     return {
         "access_token": access_token,
@@ -234,174 +219,198 @@ async def refresh_token(refresh_token: str):
     return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
 
 
-@router.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: UserInDB = Depends(get_current_user)):
-    return current_user
+# ====================== SUPER ADMIN ONLY ======================
 
-
-# ====================== SUPER ADMIN ONLY (Admin bana sakte hain) ======================
-
-@router.get("/users", response_model=List[UserResponse])
-async def get_all_users(current_user: UserInDB = Depends(get_current_user)):
-    """Saare users ki list - Sirf Super Admin ko allowed"""
-    require_superadmin(current_user)
-
-    cursor = users_collection.find({})
-    users = []
-    async for doc in cursor:
-        doc["id"] = str(doc.pop("_id"))
-        users.append(UserResponse(**{k: v for k, v in doc.items() if k in UserResponse.model_fields}))
-    return users
-
-
-@router.post("/make-admin")
-async def make_admin(
-    request: MakeAdminRequest,
-    current_user: UserInDB = Depends(get_current_user)
+@router.post("/create-admin", response_model=AdminResponse)
+async def create_admin(
+    admin_data: AdminCreate,
+    current_user = Depends(get_current_user)
 ):
-    """Kisi user ko Admin banaye - Sirf Super Admin"""
+    """Sirf Super Admin hi naya admin create kar sakta hai"""
     require_superadmin(current_user)
     
-    if request.role not in ["admin", "user"]:
-        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+    # Check passwords match
+    if admin_data.password != admin_data.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
     
-    try:
-        obj_id = ObjectId(request.user_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid user ID")
+    # Check if username exists
+    existing = await users_collection.find_one({"username": admin_data.username})
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
     
-    # Check if user exists
-    user = await users_collection.find_one({"_id": obj_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    # Check if email exists
+    existing_email = await users_collection.find_one({"email": admin_data.email})
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email already exists")
     
-    # Superadmin ko modify nahi kar sakte
-    if user.get("is_superadmin", False):
-        raise HTTPException(status_code=400, detail="Cannot modify superadmin user")
-    
-    # Update role
-    result = await users_collection.update_one(
-        {"_id": obj_id},
-        {"$set": {
-            "role": request.role,
-            "updated_at": datetime.utcnow()
-        }}
-    )
-    
-    return {
-        "message": f"User role updated to {request.role} successfully",
-        "user_id": request.user_id,
-        "role": request.role
+    # Create admin
+    hashed_password = get_password_hash(admin_data.password)
+    admin_dict = {
+        "username": admin_data.username,
+        "email": admin_data.email,
+        "full_name": admin_data.full_name,
+        "hashed_password": hashed_password,
+        "role": "admin",
+        "created_at": datetime.utcnow(),
+        "created_by": current_user.get("username")  # Super admin ka username
     }
+    
+    result = await users_collection.insert_one(admin_dict)
+    new_admin = await users_collection.find_one({"_id": result.inserted_id})
+    
+    return AdminResponse(
+        id=str(new_admin["_id"]),
+        username=new_admin["username"],
+        email=new_admin["email"],
+        full_name=new_admin.get("full_name"),
+        role="admin",
+        created_at=new_admin["created_at"],
+        created_by=new_admin["created_by"]
+    )
 
 
-@router.get("/admins", response_model=List[UserResponse])
-async def get_all_admins(current_user: UserInDB = Depends(get_current_user)):
-    """Saare admins ki list - Sirf Super Admin"""
+@router.get("/admins", response_model=List[AdminResponse])
+async def get_all_admins(current_user = Depends(get_current_user)):
+    """Saare admins ki list - Sirf Super Admin dekh sakta hai"""
     require_superadmin(current_user)
     
     cursor = users_collection.find({"role": "admin"})
-    users = []
+    admins = []
     async for doc in cursor:
-        doc["id"] = str(doc.pop("_id"))
-        users.append(UserResponse(**{k: v for k, v in doc.items() if k in UserResponse.model_fields}))
-    return users
+        admins.append(AdminResponse(
+            id=str(doc["_id"]),
+            username=doc["username"],
+            email=doc["email"],
+            full_name=doc.get("full_name"),
+            role="admin",
+            created_at=doc["created_at"],
+            created_by=doc.get("created_by", "unknown")
+        ))
+    return admins
 
 
-@router.delete("/users/{user_id}")
-async def delete_user(user_id: str, current_user: UserInDB = Depends(get_current_user)):
-    """Kisi user ko delete karo - Sirf Super Admin"""
+@router.get("/admin/{admin_id}")
+async def get_admin_by_id(
+    admin_id: str,
+    current_user = Depends(get_current_user)
+):
+    """Kisi specific admin ki details - Sirf Super Admin"""
     require_superadmin(current_user)
-
+    
     try:
-        obj_id = ObjectId(user_id)
+        obj_id = ObjectId(admin_id)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid user ID")
-
-    # Khud ko delete nahi kar sakta
-    if current_user.id == user_id:
-        raise HTTPException(status_code=400, detail="You cannot delete yourself")
+        raise HTTPException(status_code=400, detail="Invalid admin ID")
     
-    # Check if user exists
-    user = await users_collection.find_one({"_id": obj_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    admin = await users_collection.find_one({"_id": obj_id, "role": "admin"})
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin not found")
     
-    # Superadmin ko delete nahi kar sakte
-    if user.get("is_superadmin", False):
-        raise HTTPException(status_code=400, detail="Cannot delete superadmin user")
+    return AdminResponse(
+        id=str(admin["_id"]),
+        username=admin["username"],
+        email=admin["email"],
+        full_name=admin.get("full_name"),
+        role="admin",
+        created_at=admin["created_at"],
+        created_by=admin.get("created_by", "unknown")
+    )
 
+
+@router.delete("/admin/{admin_id}")
+async def delete_admin(
+    admin_id: str,
+    current_user = Depends(get_current_user)
+):
+    """Admin ko delete karo - Sirf Super Admin"""
+    require_superadmin(current_user)
+    
+    try:
+        obj_id = ObjectId(admin_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid admin ID")
+    
+    # Check if admin exists
+    admin = await users_collection.find_one({"_id": obj_id, "role": "admin"})
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    
+    # Delete
     result = await users_collection.delete_one({"_id": obj_id})
-    return {"message": "User deleted successfully"}
+    return {"message": f"Admin {admin['username']} deleted successfully"}
+
+
+@router.patch("/admin/{admin_id}/reset-password")
+async def reset_admin_password(
+    admin_id: str,
+    new_password: str,
+    current_user = Depends(get_current_user)
+):
+    """Admin ka password reset karo - Sirf Super Admin"""
+    require_superadmin(current_user)
+    
+    try:
+        obj_id = ObjectId(admin_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid admin ID")
+    
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    hashed_password = get_password_hash(new_password)
+    result = await users_collection.update_one(
+        {"_id": obj_id, "role": "admin"},
+        {"$set": {"hashed_password": hashed_password, "updated_at": datetime.utcnow()}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    
+    return {"message": "Password reset successfully"}
 
 
 # ====================== ADMIN AND SUPER ADMIN ROUTES ======================
 
-@router.get("/users/active", response_model=List[UserResponse])
-async def get_active_users(current_user: UserInDB = Depends(get_current_user)):
-    """Sirf active users - Admin aur Superadmin dekh sakte hain"""
-    require_admin_or_superadmin(current_user)
+@router.get("/me")
+async def get_current_user_info(current_user = Depends(get_current_user)):
+    """Apni info dekh sakta hai (admin ya superadmin)"""
+    require_admin(current_user)
     
-    cursor = users_collection.find({"disabled": False})
-    users = []
-    async for doc in cursor:
-        doc["id"] = str(doc.pop("_id"))
-        users.append(UserResponse(**{k: v for k, v in doc.items() if k in UserResponse.model_fields}))
-    return users
+    # Password field hata do response se
+    user_info = {k: v for k, v in current_user.items() if k != "hashed_password"}
+    user_info["id"] = str(user_info.pop("_id")) if "_id" in user_info else user_info.get("id")
+    
+    return user_info
 
 
-@router.patch("/users/{user_id}/disable")
-async def disable_user(
-    user_id: str,
-    current_user: UserInDB = Depends(get_current_user)
+@router.post("/change-password")
+async def change_password(
+    old_password: str,
+    new_password: str,
+    confirm_password: str,
+    current_user = Depends(get_current_user)
 ):
-    """User ko disable karo - Admin aur Superadmin"""
-    require_admin_or_superadmin(current_user)
+    """Apna password change karo (admin ya superadmin)"""
+    require_admin(current_user)
     
-    try:
-        obj_id = ObjectId(user_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid user ID")
+    # Verify old password
+    if not verify_password(old_password, current_user.get("hashed_password")):
+        raise HTTPException(status_code=400, detail="Old password is incorrect")
     
-    # Khud ko disable nahi kar sakte
-    if current_user.id == user_id:
-        raise HTTPException(status_code=400, detail="You cannot disable yourself")
+    # Check new password
+    if new_password != confirm_password:
+        raise HTTPException(status_code=400, detail="New passwords do not match")
     
-    user = await users_collection.find_one({"_id": obj_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     
-    # Superadmin ko disable nahi kar sakte
-    if user.get("is_superadmin", False):
-        raise HTTPException(status_code=400, detail="Cannot disable superadmin user")
-    
-    result = await users_collection.update_one(
-        {"_id": obj_id},
-        {"$set": {"disabled": True, "updated_at": datetime.utcnow()}}
+    # Update password
+    hashed_password = get_password_hash(new_password)
+    await users_collection.update_one(
+        {"username": current_user.get("username")},
+        {"$set": {"hashed_password": hashed_password, "updated_at": datetime.utcnow()}}
     )
     
-    return {"message": "User disabled successfully"}
+    return {"message": "Password changed successfully"}
 
 
-@router.patch("/users/{user_id}/enable")
-async def enable_user(
-    user_id: str,
-    current_user: UserInDB = Depends(get_current_user)
-):
-    """User ko enable karo - Admin aur Superadmin"""
-    require_admin_or_superadmin(current_user)
-    
-    try:
-        obj_id = ObjectId(user_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid user ID")
-    
-    result = await users_collection.update_one(
-        {"_id": obj_id},
-        {"$set": {"disabled": False, "updated_at": datetime.utcnow()}}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    return {"message": "User enabled successfully"}
