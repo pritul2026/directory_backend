@@ -125,7 +125,7 @@ async def search_airlines(
             "slug": doc.get("slug", ""),
             "name": doc.get("name", ""),
             "category": doc.get("category", "airline"),
-            "is_active": doc.get("is_active", True)  # Added is_active flag in response
+            "is_active": doc.get("is_active", True)
         })
     
     return entries
@@ -179,7 +179,7 @@ async def create_airline(
 
     airline_dict = data.dict()
     airline_dict["slug"] = generate_slug(data.name)
-    airline_dict["is_active"] = True          # Naya entry hamesha active
+    airline_dict["is_active"] = True
     airline_dict["created_at"] = datetime.utcnow()
     airline_dict["updated_at"] = datetime.utcnow()
 
@@ -238,6 +238,7 @@ async def deactivate_airline(
     entry_id: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
+    """Sirf inactive karne ke liye"""
     try:
         obj_id = ObjectId(entry_id)
     except Exception:
@@ -258,7 +259,7 @@ async def activate_airline(
     entry_id: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Inactive airline ko wapas active karne ke liye"""
+    """Sirf active karne ke liye"""
     try:
         obj_id = ObjectId(entry_id)
     except Exception:
@@ -272,3 +273,35 @@ async def activate_airline(
         raise HTTPException(status_code=404, detail="Entry not found")
 
     return {"message": "Entry activated successfully"}
+
+
+@router.patch("/{entry_id}/toggle-status")
+async def toggle_airline_status(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Ek hi API se active ko inactive aur inactive ko active karega"""
+    try:
+        obj_id = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID")
+
+    # Pehle current status fetch karo
+    airline = await airlines_collection.find_one({"_id": obj_id})
+    if not airline:
+        raise HTTPException(status_code=404, detail="Airline not found")
+    
+    # Current status ke opposite set karo
+    new_status = not airline.get("is_active", True)
+    
+    # Update karo
+    result = await airlines_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {"is_active": new_status, "updated_at": datetime.utcnow()}}
+    )
+    
+    status_text = "activated" if new_status else "deactivated"
+    return {
+        "message": f"Airline {status_text} successfully",
+        "is_active": new_status
+    }

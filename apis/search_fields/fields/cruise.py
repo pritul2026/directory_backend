@@ -303,3 +303,34 @@ async def activate_cruise(
         raise HTTPException(status_code=404, detail="Cruise not found")
 
     return {"message": "Cruise activated successfully"}
+
+@router.patch("/{entry_id}/toggle-status")
+async def toggle_cruise_status(
+    entry_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Ek hi API se active ko inactive aur inactive ko active karega"""
+    try:
+        obj_id = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID")
+
+    # Pehle current status fetch karo
+    cruise = await cruise_collection.find_one({"_id": obj_id})
+    if not cruise:
+        raise HTTPException(status_code=404, detail="Cruise not found")
+    
+    # Current status ke opposite set karo
+    new_status = not cruise.get("is_active", True)
+    
+    # Update karo
+    result = await cruise_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {"is_active": new_status, "updated_at": datetime.utcnow()}}
+    )
+    
+    status_text = "activated" if new_status else "deactivated"
+    return {
+        "message": f"Cruise {status_text} successfully",
+        "is_active": new_status
+    }
