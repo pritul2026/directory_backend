@@ -62,10 +62,16 @@ class UserResponse(BaseModel):
     disabled: bool = False
     created_at: Optional[datetime] = None
     is_superadmin: bool = False
+    role: str = "user"  # user, admin, superadmin
 
 
 class UserInDB(UserResponse):
     hashed_password: str
+
+
+class MakeAdminRequest(BaseModel):
+    user_id: str
+    role: str = Field(..., description="Role can be 'admin' or 'user'")
 
 
 # ========================= HELPERS =========================
@@ -120,12 +126,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 
 def require_superadmin(current_user: UserInDB):
-    """Strict check - Sirf admin_creative_volt ko hi allow"""
-    if current_user.username == SUPER_ADMIN_USERNAME:
+    """Strict check - Sirf superadmin ko hi allow"""
+    if current_user.is_superadmin:
         return True
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Super Admin privileges required. Only admin_creative_volt is allowed."
+        detail="Super Admin privileges required."
+    )
+
+
+def require_admin_or_superadmin(current_user: UserInDB):
+    """Admin ya Superadmin ko allow"""
+    if current_user.role in ["admin", "superadmin"] or current_user.is_superadmin:
+        return True
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin or Super Admin privileges required."
     )
 
 
@@ -151,7 +167,9 @@ async def register(user: UserCreate):
 
     hashed_password = get_password_hash(user.password)
 
+    # Superadmin check
     is_superadmin = (user.username == SUPER_ADMIN_USERNAME)
+    role = "superadmin" if is_superadmin else "user"
 
     user_dict = {
         "username": user.username,
@@ -160,6 +178,7 @@ async def register(user: UserCreate):
         "hashed_password": hashed_password,
         "disabled": False,
         "is_superadmin": is_superadmin,
+        "role": role,
         "created_at": datetime.utcnow()
     }
 
@@ -220,14 +239,68 @@ async def read_users_me(current_user: UserInDB = Depends(get_current_user)):
     return current_user
 
 
-# ====================== SUPER ADMIN ONLY ======================
+# ====================== SUPER ADMIN ONLY (Admin bana sakte hain) ======================
 
 @router.get("/users", response_model=List[UserResponse])
 async def get_all_users(current_user: UserInDB = Depends(get_current_user)):
-    """Saare users ki list - Sirf admin_creative_volt ko allowed"""
+    """Saare users ki list - Sirf Super Admin ko allowed"""
     require_superadmin(current_user)
 
     cursor = users_collection.find({})
+    users = []
+    async for doc in cursor:
+        doc["id"] = str(doc.pop("_id"))
+        users.append(UserResponse(**{k: v for k, v in doc.items() if k in UserResponse.model_fields}))
+    return users
+
+
+@router.post("/make-admin")
+async def make_admin(
+    request: MakeAdminRequest,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Kisi user ko Admin banaye - Sirf Super Admin"""
+    require_superadmin(current_user)
+    
+    if request.role not in ["admin", "user"]:
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+    
+    try:
+        obj_id = ObjectId(request.user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    
+    # Check if user exists
+    user = await users_collection.find_one({"_id": obj_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Superadmin ko modify nahi kar sakte
+    if user.get("is_superadmin", False):
+        raise HTTPException(status_code=400, detail="Cannot modify superadmin user")
+    
+    # Update role
+    result = await users_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {
+            "role": request.role,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    
+    return {
+        "message": f"User role updated to {request.role} successfully",
+        "user_id": request.user_id,
+        "role": request.role
+    }
+
+
+@router.get("/admins", response_model=List[UserResponse])
+async def get_all_admins(current_user: UserInDB = Depends(get_current_user)):
+    """Saare admins ki list - Sirf Super Admin"""
+    require_superadmin(current_user)
+    
+    cursor = users_collection.find({"role": "admin"})
     users = []
     async for doc in cursor:
         doc["id"] = str(doc.pop("_id"))
@@ -248,9 +321,87 @@ async def delete_user(user_id: str, current_user: UserInDB = Depends(get_current
     # Khud ko delete nahi kar sakta
     if current_user.id == user_id:
         raise HTTPException(status_code=400, detail="You cannot delete yourself")
+    
+    # Check if user exists
+    user = await users_collection.find_one({"_id": obj_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Superadmin ko delete nahi kar sakte
+    if user.get("is_superadmin", False):
+        raise HTTPException(status_code=400, detail="Cannot delete superadmin user")
 
     result = await users_collection.delete_one({"_id": obj_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
-
     return {"message": "User deleted successfully"}
+
+
+# ====================== ADMIN AND SUPER ADMIN ROUTES ======================
+
+@router.get("/users/active", response_model=List[UserResponse])
+async def get_active_users(current_user: UserInDB = Depends(get_current_user)):
+    """Sirf active users - Admin aur Superadmin dekh sakte hain"""
+    require_admin_or_superadmin(current_user)
+    
+    cursor = users_collection.find({"disabled": False})
+    users = []
+    async for doc in cursor:
+        doc["id"] = str(doc.pop("_id"))
+        users.append(UserResponse(**{k: v for k, v in doc.items() if k in UserResponse.model_fields}))
+    return users
+
+
+@router.patch("/users/{user_id}/disable")
+async def disable_user(
+    user_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """User ko disable karo - Admin aur Superadmin"""
+    require_admin_or_superadmin(current_user)
+    
+    try:
+        obj_id = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    
+    # Khud ko disable nahi kar sakte
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="You cannot disable yourself")
+    
+    user = await users_collection.find_one({"_id": obj_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Superadmin ko disable nahi kar sakte
+    if user.get("is_superadmin", False):
+        raise HTTPException(status_code=400, detail="Cannot disable superadmin user")
+    
+    result = await users_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {"disabled": True, "updated_at": datetime.utcnow()}}
+    )
+    
+    return {"message": "User disabled successfully"}
+
+
+@router.patch("/users/{user_id}/enable")
+async def enable_user(
+    user_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """User ko enable karo - Admin aur Superadmin"""
+    require_admin_or_superadmin(current_user)
+    
+    try:
+        obj_id = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    
+    result = await users_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {"disabled": False, "updated_at": datetime.utcnow()}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {"message": "User enabled successfully"}
