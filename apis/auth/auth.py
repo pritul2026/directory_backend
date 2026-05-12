@@ -29,9 +29,15 @@ ACCESS_TOKEN_EXPIRE_DAYS = 3
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 SUPER_ADMIN_USERNAME = "admin_creative_volt"
-SUPER_ADMIN_PASSWORD = "Media@1234"  # Change this to strong password
+SUPER_ADMIN_PASSWORD = "Media@1234"
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Fix bcrypt issue - Use specific bcrypt settings
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12,
+    bcrypt__ident="2b"
+)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 # MongoDB Connection
@@ -74,7 +80,6 @@ class SuperAdminResponse(BaseModel):
     created_at: datetime
 
 
-# ✅ YEH CLASS IMPORTANT HAI - Airlines aur Cruise files ke liye
 class UserInDB(BaseModel):
     id: str
     username: str
@@ -82,7 +87,7 @@ class UserInDB(BaseModel):
     full_name: Optional[str] = None
     hashed_password: str
     disabled: bool = False
-    role: str  # "superadmin" or "admin"
+    role: str
     created_at: datetime
     created_by: Optional[str] = None
     
@@ -92,11 +97,25 @@ class UserInDB(BaseModel):
 
 # ========================= HELPERS =========================
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    """Password verify with error handling"""
+    try:
+        result = pwd_context.verify(plain_password, hashed_password)
+        print(f"Password verification: {result}")  # Debug log
+        return result
+    except Exception as e:
+        print(f"Password verification error: {e}")
+        return False
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    """Hash password with bcrypt"""
+    try:
+        hashed = pwd_context.hash(password)
+        print(f"Password hashed successfully")  # Debug log
+        return hashed
+    except Exception as e:
+        print(f"Hashing error: {e}")
+        raise e
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -122,7 +141,6 @@ async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-# ✅ YEH FUNCTION AB UserInDB RETURN KAREGA
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -141,7 +159,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
     if user is None:
         raise credentials_exception
     
-    # Convert to UserInDB object
     return UserInDB(
         id=user["id"],
         username=user["username"],
@@ -156,7 +173,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
 
 
 def require_superadmin(current_user: UserInDB):
-    """Sirf superadmin ko allow"""
     if current_user.role == "superadmin":
         return True
     raise HTTPException(
@@ -166,7 +182,6 @@ def require_superadmin(current_user: UserInDB):
 
 
 def require_admin(current_user: UserInDB):
-    """Admin ya superadmin ko allow"""
     if current_user.role in ["admin", "superadmin"]:
         return True
     raise HTTPException(
@@ -178,24 +193,37 @@ def require_admin(current_user: UserInDB):
 # ========================= INITIAL SETUP =========================
 async def init_superadmin():
     """Pehli baar server start ho to superadmin create ho jaaye"""
-    existing = await users_collection.find_one({"username": SUPER_ADMIN_USERNAME})
-    if not existing:
-        hashed_password = get_password_hash(SUPER_ADMIN_PASSWORD)
-        superadmin_dict = {
-            "username": SUPER_ADMIN_USERNAME,
-            "email": "superadmin@example.com",
-            "full_name": "Super Admin",
-            "hashed_password": hashed_password,
-            "role": "superadmin",
-            "disabled": False,
-            "created_at": datetime.utcnow(),
-            "created_by": "system"
-        }
-        await users_collection.insert_one(superadmin_dict)
-        print(f"✅ Superadmin created: {SUPER_ADMIN_USERNAME}")
-        print(f"⚠️  Password: {SUPER_ADMIN_PASSWORD}")
-    else:
-        print("✅ Superadmin already exists")
+    try:
+        existing = await users_collection.find_one({"username": SUPER_ADMIN_USERNAME})
+        
+        if not existing:
+            print(f"Creating superadmin: {SUPER_ADMIN_USERNAME}")
+            hashed_password = get_password_hash(SUPER_ADMIN_PASSWORD)
+            print(f"Generated hash: {hashed_password}")
+            
+            superadmin_dict = {
+                "username": SUPER_ADMIN_USERNAME,
+                "email": "superadmin@example.com",
+                "full_name": "Super Admin",
+                "hashed_password": hashed_password,
+                "role": "superadmin",
+                "disabled": False,
+                "created_at": datetime.utcnow(),
+                "created_by": "system"
+            }
+            await users_collection.insert_one(superadmin_dict)
+            print(f"✅ Superadmin created successfully!")
+            print(f"   Username: {SUPER_ADMIN_USERNAME}")
+            print(f"   Password: {SUPER_ADMIN_PASSWORD}")
+        else:
+            print(f"✅ Superadmin already exists: {SUPER_ADMIN_USERNAME}")
+            
+            # Debug: Check existing password hash
+            print(f"Existing user data: {existing.get('username')}, role: {existing.get('role')}")
+            print(f"Hash stored: {existing.get('hashed_password')[:50]}...")
+            
+    except Exception as e:
+        print(f"Error in init_superadmin: {e}")
 
 
 # ========================= PUBLIC ROUTES =========================
@@ -203,15 +231,34 @@ async def init_superadmin():
 @router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """Superadmin ya admin login kar sakte hain"""
+    print(f"Login attempt for username: {form_data.username}")
+    
     user = await get_user_by_username(form_data.username)
     
-    if not user or not verify_password(form_data.password, user.get("hashed_password")):
+    if not user:
+        print(f"User not found: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
+    
+    print(f"User found: {user['username']}, role: {user['role']}")
+    print(f"Stored hash: {user['hashed_password'][:50]}...")
+    
+    # Verify password
+    is_valid = verify_password(form_data.password, user["hashed_password"])
+    
+    if not is_valid:
+        print(f"Password verification failed for: {form_data.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    print(f"Login successful for: {form_data.username}")
+    
     access_token = create_access_token(data={"sub": user["username"]})
     refresh_token = create_refresh_token(data={"sub": user["username"]})
 
@@ -253,24 +300,19 @@ async def create_admin(
     admin_data: AdminCreate,
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Sirf Super Admin hi naya admin create kar sakta hai"""
     require_superadmin(current_user)
     
-    # Check passwords match
     if admin_data.password != admin_data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
     
-    # Check if username exists
     existing = await users_collection.find_one({"username": admin_data.username})
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
     
-    # Check if email exists
     existing_email = await users_collection.find_one({"email": admin_data.email})
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already exists")
     
-    # Create admin
     hashed_password = get_password_hash(admin_data.password)
     admin_dict = {
         "username": admin_data.username,
@@ -280,7 +322,7 @@ async def create_admin(
         "role": "admin",
         "disabled": False,
         "created_at": datetime.utcnow(),
-        "created_by": current_user.username  # Super admin ka username
+        "created_by": current_user.username
     }
     
     result = await users_collection.insert_one(admin_dict)
@@ -299,7 +341,6 @@ async def create_admin(
 
 @router.get("/admins", response_model=List[AdminResponse])
 async def get_all_admins(current_user: UserInDB = Depends(get_current_user)):
-    """Saare admins ki list - Sirf Super Admin dekh sakta hai"""
     require_superadmin(current_user)
     
     cursor = users_collection.find({"role": "admin"})
@@ -322,7 +363,6 @@ async def get_admin_by_id(
     admin_id: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Kisi specific admin ki details - Sirf Super Admin"""
     require_superadmin(current_user)
     
     try:
@@ -350,7 +390,6 @@ async def delete_admin(
     admin_id: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Admin ko delete karo - Sirf Super Admin"""
     require_superadmin(current_user)
     
     try:
@@ -358,12 +397,10 @@ async def delete_admin(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid admin ID")
     
-    # Check if admin exists
     admin = await users_collection.find_one({"_id": obj_id, "role": "admin"})
     if not admin:
         raise HTTPException(status_code=404, detail="Admin not found")
     
-    # Delete
     await users_collection.delete_one({"_id": obj_id})
     return {"message": f"Admin {admin['username']} deleted successfully"}
 
@@ -374,7 +411,6 @@ async def reset_admin_password(
     new_password: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Admin ka password reset karo - Sirf Super Admin"""
     require_superadmin(current_user)
     
     try:
@@ -401,7 +437,6 @@ async def reset_admin_password(
 
 @router.get("/me", response_model=UserInDB)
 async def get_current_user_info(current_user: UserInDB = Depends(get_current_user)):
-    """Apni info dekh sakta hai (admin ya superadmin)"""
     require_admin(current_user)
     return current_user
 
@@ -413,21 +448,17 @@ async def change_password(
     confirm_password: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Apna password change karo (admin ya superadmin)"""
     require_admin(current_user)
     
-    # Verify old password
     if not verify_password(old_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Old password is incorrect")
     
-    # Check new password
     if new_password != confirm_password:
         raise HTTPException(status_code=400, detail="New passwords do not match")
     
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     
-    # Update password
     hashed_password = get_password_hash(new_password)
     await users_collection.update_one(
         {"username": current_user.username},
@@ -435,3 +466,5 @@ async def change_password(
     )
     
     return {"message": "Password changed successfully"}
+
+
