@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient
 from collections import defaultdict
 
@@ -22,11 +22,69 @@ client = AsyncIOMotorClient(MONGO_URI)
 db = client['directory_db']
 places_collection = db["places"]
 
-
 if not GOOGLE_PLACES_API_KEY:
     raise Exception("GOOGLE_PLACES_API_KEY .env file mein nahi mila!")
 
 
+# ====================== RESPONSE MODELS ======================
+class PlaceResponse(BaseModel):
+    id: Optional[str] = None
+    name: Optional[str] = None
+    address: Optional[str] = None
+    short_address: Optional[str] = None
+    rating: Optional[float] = None
+    user_ratings_total: Optional[int] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    business_status: Optional[str] = None
+    types: List[str] = []
+    primary_type: Optional[str] = None
+    google_maps_url: Optional[str] = None
+    photo_urls: List[str] = []
+    photos: List[Dict[str, Any]] = []
+    photo_count: Optional[int] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    searched_keyword: Optional[str] = None
+
+
+class NearbyPlacesResponse(BaseModel):
+    success: bool
+    count: int
+    results: List[PlaceResponse]
+    source: str
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    keyword_used: Optional[str] = None
+    saved_to_db: Optional[int] = None
+
+
+class CitySummaryResponse(BaseModel):
+    success: bool
+    city: str
+    state: Optional[str] = None
+    country: Optional[str] = None
+    total_places: int
+    total_keywords: int
+    keywords: List[Dict[str, Any]]
+    message: Optional[str] = None
+
+
+class DeleteResponse(BaseModel):
+    success: bool
+    message: str
+    city: str
+    state: Optional[str] = None
+    country: Optional[str] = None
+    keyword: str
+    deleted_count: int
+
+
+# ====================== REQUEST MODEL ======================
 class Location(BaseModel):
     latitude: float
     longitude: float
@@ -35,10 +93,12 @@ class Location(BaseModel):
 class PlaceRequest(BaseModel):
     location: Location
     radius: int = 10000
-    max_results: int = 10                    # Default 10
+    max_results: int = 10
     included_types: Optional[List[str]] = None
     keyword: Optional[str] = None
     city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
 
     @field_validator("included_types")
     @classmethod
@@ -47,7 +107,7 @@ class PlaceRequest(BaseModel):
             return None
         return [t.strip().lower() for t in v if t and t.strip()]
 
-    @field_validator("keyword", "city")
+    @field_validator("keyword", "city", "state", "country")
     @classmethod
     def validate_string(cls, v):
         if not v:
@@ -57,18 +117,25 @@ class PlaceRequest(BaseModel):
 
 
 # ====================== COMMON HELPER ======================
-async def get_cached_places(city: str, keyword: str, max_age_hours: int = 24):
+async def get_cached_places(city: str, state: str, country: str, keyword: str, max_age_hours: int = 24):
     if not city or not keyword:
         return None
     
     cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
     
-    cached = await places_collection.find({
+    query = {
         "city": {"$regex": f"^{city}$", "$options": "i"},
         "searched_keyword": {"$regex": f"^{keyword}$", "$options": "i"}
-    }).sort("last_updated", -1).to_list(length=50)
+    }
+    
+    if state:
+        query["state"] = {"$regex": f"^{state}$", "$options": "i"}
+    if country:
+        query["country"] = {"$regex": f"^{country}$", "$options": "i"}
 
-    if cached and cached and cached[0].get("last_updated") and cached[0]["last_updated"] > cutoff:
+    cached = await places_collection.find(query).sort("last_updated", -1).to_list(length=50)
+
+    if cached and cached[0].get("last_updated") and cached[0]["last_updated"] > cutoff:
         return cached
     return None
 
@@ -93,16 +160,20 @@ def prepare_response_place(place):
         "phone": place.get("phone"),
         "website": place.get("website"),
         "city": place.get("city"),
+        "state": place.get("state"),
+        "country": place.get("country"),
         "searched_keyword": place.get("searched_keyword"),
     }
 
 
-# ====================== 1. CACHE API (Normal Search) ======================
-@router.post("/nearby")
+# ====================== 1. CACHE API ======================
+@router.post("/nearby", response_model=NearbyPlacesResponse)
 async def get_nearby_places_cached(request: PlaceRequest):
     """Fast Search - DB Cache pehle check karega"""
     try:
-        cached_places = await get_cached_places(request.city, request.keyword)
+        cached_places = await get_cached_places(
+            request.city, request.state, request.country, request.keyword
+        )
 
         if cached_places:
             results = [prepare_response_place(p) for p in cached_places[:request.max_results]]
@@ -112,10 +183,11 @@ async def get_nearby_places_cached(request: PlaceRequest):
                 "results": results,
                 "source": "cache",
                 "city": request.city,
+                "state": request.state,
+                "country": request.country,
                 "keyword_used": request.keyword
             }
 
-        # Cache nahi mila to Google se fetch
         return await fetch_from_google(request)
 
     except Exception as e:
@@ -123,7 +195,7 @@ async def get_nearby_places_cached(request: PlaceRequest):
 
 
 # ====================== 2. FRESH SEARCH API ======================
-@router.post("/nearby/fresh")
+@router.post("/nearby/fresh", response_model=NearbyPlacesResponse)
 async def get_nearby_places_fresh(request: PlaceRequest):
     """Force Fresh Google Search"""
     try:
@@ -134,6 +206,7 @@ async def get_nearby_places_fresh(request: PlaceRequest):
 
 # ====================== GOOGLE FETCH LOGIC ======================
 async def fetch_from_google(request: PlaceRequest):
+    # ... headers same (no change) ...
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
@@ -218,6 +291,8 @@ async def fetch_from_google(request: PlaceRequest):
             "website": place.get("websiteUri"),
 
             "city": request.city,
+            "state": request.state,
+            "country": request.country,
             "searched_keyword": request.keyword,
             "searched_types": request.included_types,
             "searched_location": {"latitude": request.location.latitude, "longitude": request.location.longitude},
@@ -244,36 +319,42 @@ async def fetch_from_google(request: PlaceRequest):
         "results": places,
         "source": "google_api",
         "city": request.city,
+        "state": request.state,
+        "country": request.country,
         "keyword_used": request.keyword,
     }
 
 
-# ====================== 3. CITY SEARCH API ======================
-@router.get("/city/{city_name}")
-async def get_places_by_city(city_name: str, limit: int = 100):
-    """City mein kitne keywords ke kitne places saved hain"""
+# ====================== 3. CITY SEARCH API (Updated) ======================
+@router.get("/city/{city_name}", response_model=CitySummaryResponse)
+async def get_places_by_city(city_name: str, state: Optional[str] = None, country: Optional[str] = None, limit: int = 100):
     try:
-        places = await places_collection.find(
-            {"city": {"$regex": f"^{city_name}$", "$options": "i"}}
-        ).to_list(length=limit)
+        query = {"city": {"$regex": f"^{city_name}$", "$options": "i"}}
+        if state:
+            query["state"] = {"$regex": f"^{state}$", "$options": "i"}
+        if country:
+            query["country"] = {"$regex": f"^{country}$", "$options": "i"}
+
+        places = await places_collection.find(query).to_list(length=limit)
 
         if not places:
             return {
                 "success": True,
                 "city": city_name,
-                "count": 0,
-                "message": "No data found for this city",
-                "keywords": []
+                "state": state,
+                "country": country,
+                "total_places": 0,
+                "total_keywords": 0,
+                "keywords": [],
+                "message": "No data found for this city"
             }
 
-        # Group by searched_keyword
         keyword_group = defaultdict(list)
         for place in places:
             kw = place.get("searched_keyword")
             if kw:
                 keyword_group[kw].append(place)
 
-        # Summary banao
         keywords_summary = []
         for keyword, items in keyword_group.items():
             keywords_summary.append({
@@ -282,12 +363,13 @@ async def get_places_by_city(city_name: str, limit: int = 100):
                 "last_updated": items[0].get("last_updated")
             })
 
-        # Sort by count (sabse zyada wale pehle)
         keywords_summary.sort(key=lambda x: x["count"], reverse=True)
 
         return {
             "success": True,
             "city": city_name,
+            "state": state,
+            "country": country,
             "total_places": len(places),
             "total_keywords": len(keywords_summary),
             "keywords": keywords_summary
@@ -298,14 +380,22 @@ async def get_places_by_city(city_name: str, limit: int = 100):
 
 
 # ====================== 4. DELETE API ======================
-@router.delete("/city/{city_name}")
-async def delete_places_by_city_keyword(city_name: str, keyword: Optional[str] = None):
-    """City + Keyword delete karne ke liye"""
+@router.delete("/city/{city_name}", response_model=DeleteResponse)
+async def delete_places_by_city_keyword(
+    city_name: str, 
+    keyword: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None
+):
     try:
         filter_query = {"city": {"$regex": f"^{city_name}$", "$options": "i"}}
         
         if keyword:
             filter_query["searched_keyword"] = {"$regex": f"^{keyword}$", "$options": "i"}
+        if state:
+            filter_query["state"] = {"$regex": f"^{state}$", "$options": "i"}
+        if country:
+            filter_query["country"] = {"$regex": f"^{country}$", "$options": "i"}
 
         result = await places_collection.delete_many(filter_query)
 
@@ -313,6 +403,8 @@ async def delete_places_by_city_keyword(city_name: str, keyword: Optional[str] =
             "success": True,
             "message": "Data successfully deleted",
             "city": city_name,
+            "state": state,
+            "country": country,
             "keyword": keyword or "ALL",
             "deleted_count": result.deleted_count
         }
