@@ -410,3 +410,55 @@ async def delete_places_by_city_keyword(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ====================== GET PLACE BY ID (Only from DB) ======================
+@router.get("/{place_id}", response_model=PlaceResponse)
+async def get_place_by_id(place_id: str):
+    """Get single place by Google Place ID - Only from MongoDB"""
+    try:
+        place = await places_collection.find_one(
+            {"google_place_id": place_id}
+        )
+
+        if not place:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Place with ID {place_id} not found in database"
+            )
+
+        return prepare_response_place(place)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{place_id}", response_model=PlaceResponse)
+async def get_place_by_id(
+    place_id: str, 
+    city: Optional[str] = None,
+    state: Optional[str] = None
+):
+    """Get place by ID with optional city/state filter"""
+    try:
+        query = {"google_place_id": place_id}
+        
+        if city:
+            query["city"] = {"$regex": f"^{city}$", "$options": "i"}
+        if state:
+            query["state"] = {"$regex": f"^{state}$", "$options": "i"}
+
+        place = await places_collection.find_one(query)
+
+        if not place:
+            raise HTTPException(
+                status_code=404, 
+                detail="Place not found in database"
+            )
+
+        return prepare_response_place(place)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
